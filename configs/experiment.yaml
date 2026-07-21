@@ -58,7 +58,7 @@ rl:
   batch_size: 32
   group_size: 8                      # G explanations per activation
   temperature: 1.0
-  max_new_tokens: 120
+  max_new_tokens: 180
   kl_beta: 0.05
   lr_av: 2.0e-5
   lr_ar: 1.0e-4
