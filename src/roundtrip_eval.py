@@ -262,13 +262,17 @@ def main():
     # ── Phase 7 activation-swap control ─────────────────────────────────────
     pred_swap = run_ar(explanations_swap)
 
-    # Mean-activation floor: predict the L2-normalized holdout mean for every
-    # row. This is what a fully uninformative predictor scores; the swap
-    # condition should collapse toward it if the AV is prior-driven.
-    # Deliberately NOT re-normalized after averaging (fve_nrm's own footgun
-    # note: re-projecting the mean of unit vectors onto the sphere inflates
-    # the comparison) — fed through the identical fve_nrm/mse_nrm pipeline as
-    # every other condition so all three numbers are computed the same way.
+    # Mean-activation floor: predict the holdout mean direction for every row.
+    # This is what a fully uninformative predictor scores.
+    #
+    # CAVEAT worth knowing when reading this number: fve_nrm normalizes `pred`
+    # internally, so mu_unit gets re-projected onto the sphere before scoring
+    # regardless of what we do here. That makes this the *normalized-mean*
+    # floor, which lands around -0.34 rather than the 0.0 a raw-mean predictor
+    # would score (feed pred = mu into fve_nrm's algebra and num == den
+    # exactly). Both are legitimate references and the swap verdict is
+    # insensitive to the choice — swap sits far below either — but do not read
+    # this as "the floor is 0.0 and we are below it by 0.34".
     mu_unit = torch.nn.functional.normalize(acts, dim=-1).mean(dim=0)
     floor_pred = mu_unit.unsqueeze(0).expand_as(acts).contiguous()
 
@@ -290,20 +294,20 @@ def main():
 
     gap_real_swap = real_fve - swap_fve
     gap_swap_floor = swap_fve - floor_fve
-    # Judgment call (documented, not hidden): PASS requires the swap condition
-    # to be AT OR BELOW the mean-activation floor (gap_swap_floor <= +0.05 —
-    # i.e. no residual "prior credit" propping swap FVE up above what a fully
-    # uninformative constant predictor gets) AND a real-vs-swap gap of at least
-    # 0.15 abs FVE. Swap landing BELOW the floor is not a caveat on the pass —
-    # it is the stronger version of it: a prior-driven AV would produce
-    # near-floor (~0) FVE when scored against an unrelated row, because a
-    # generic explanation reconstructs to ~the mean regardless of target. Swap
-    # FVE undershooting the floor means the AR is confidently reconstructing
-    # the SWAPPED PARTNER's real (and now systematically wrong-for-this-row)
-    # direction — which requires the AV to have encoded real, row-specific
-    # information about h_j into z_j. FAIL requires the gap to be under 0.05
-    # abs FVE (swap indistinguishable from real). Anything else is reported as
-    # AMBIGUOUS rather than forced.
+    # Judgment call (documented, not hidden). PASS requires the swap condition
+    # to have fallen to the floor OR BELOW it, plus a real-vs-swap gap of at
+    # least 0.15 abs FVE.
+    #
+    # Below-floor is emphatically a pass, not an anomaly — an earlier version of
+    # this check used abs(gap_swap_floor) and mislabelled a clean pass as
+    # AMBIGUOUS. The floor is the *centroid*: blandly wrong about everything,
+    # never far from anything. AR(AV(h_j)) is CONFIDENTLY wrong — a specific,
+    # committed reconstruction of a different transaction — and a vector aimed
+    # at a random other point in activation space is further from h_i than the
+    # centroid is. Scoring below the floor is therefore the expected signature
+    # of a pipeline that faithfully transmits whichever vector it was handed.
+    # The failure mode we actually care about is the opposite one: swap staying
+    # near real, which means the vector never mattered.
     if gap_swap_floor <= 0.05 and gap_real_swap >= 0.15:
         verdict = "PASS"
     elif gap_real_swap < 0.05:
