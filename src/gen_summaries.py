@@ -326,8 +326,32 @@ def build_parquet(layer: str = "l2") -> pd.DataFrame:
     merged = progress_df.merge(act_df, on="row_idx", how="left")
     # Deduplicate (keep last in case of re-runs)
     merged = merged.drop_duplicates(subset="row_idx", keep="last")
+
+    # Recompute importance weights here rather than plumbing them through the
+    # JSONL: doing it on the rows that actually survived generation keeps the
+    # weights correct even when some rows failed or the run was resumed.
+    merged["sample_weight"] = _importance_weights(merged, act_path)
+
     return merged[["row_idx", "activation_vector", "activation_vector_normed",
-                   "summary", "features_json", "fraud_score", "label"]]
+                   "summary", "features_json", "fraud_score", "label",
+                   "sample_weight"]]
+
+
+def _importance_weights(sampled: pd.DataFrame, act_path: Path,
+                        n_bins: int = 5) -> np.ndarray:
+    """p_natural(cell) / p_sampled(cell), mean-normalized. See stratified_sample."""
+    corpus = pd.read_parquet(act_path, columns=["fraud_score", "label"])
+    bins = np.linspace(0.0, 1.0, n_bins + 1)[1:-1]
+
+    def cells(df):
+        return (df["label"].astype(int).astype(str) + "|"
+                + np.digitize(df["fraud_score"].values, bins).astype(str))
+
+    p_nat = cells(corpus).value_counts(normalize=True)
+    smp = cells(sampled)
+    p_smp = smp.value_counts(normalize=True)
+    w = smp.map(lambda c: p_nat.get(c, 0.0) / p_smp[c]).astype(np.float64)
+    return (w / w.mean()).astype(np.float32).values
 
 
 # ── Attributions (optional) ───────────────────────────────────────────────────
@@ -354,6 +378,80 @@ def compute_attributions(mlp, prep, df_sub, device) -> pd.DataFrame:
     return pd.concat([df_sub, attr_df], axis=1)
 
 
+# ── Corpus sampling ───────────────────────────────────────────────────────────
+
+def stratified_sample(act_df: pd.DataFrame, n: int, n_bins: int,
+                      natural_frac: float, seed: int) -> pd.DataFrame:
+    """Pick which activations get summarized.
+
+    The corpus is ~3% fraud, so an iid sample spends ~97% of the API budget on
+    one corner of activation space and yields almost nothing in the cells that
+    Phase 7's headline slice needs (model errors: high score + legit label,
+    low score + fraud label).
+
+    Strategy: draw `natural_frac` of the budget iid so the natural distribution
+    is still represented, then spread the remainder evenly over the
+    (label x fraud-score-bin) cells. Every row carries `sample_weight` =
+    p_natural(cell) / p_sampled(cell), so any metric can be reweighted back to
+    the natural distribution afterwards — the boost costs nothing downstream.
+    """
+    rng = np.random.default_rng(seed)
+    df = act_df.copy()
+
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    bins[-1] = 1.0 + 1e-9
+    df["_score_bin"] = np.digitize(df["fraud_score"].values, bins[1:-1])
+    df["_cell"] = df["label"].astype(int).astype(str) + "|" + df["_score_bin"].astype(str)
+
+    n = min(n, len(df))
+    n_natural = int(round(n * natural_frac))
+
+    picked = df.sample(n=n_natural, random_state=seed).index if n_natural else df.index[:0]
+    picked = set(picked)
+
+    # Spread the boost evenly across cells, redistributing what small cells
+    # cannot absorb.
+    remaining = n - len(picked)
+    pools = {c: [i for i in sub.index if i not in picked]
+             for c, sub in df.groupby("_cell")}
+    while remaining > 0:
+        live = {c: p for c, p in pools.items() if p}
+        if not live:
+            break
+        per_cell = max(1, remaining // len(live))
+        for c, pool in live.items():
+            take = min(per_cell, len(pool), remaining)
+            if take <= 0:
+                continue
+            chosen = rng.choice(len(pool), size=take, replace=False)
+            for j in sorted(chosen, reverse=True):
+                picked.add(pool.pop(j))
+            remaining -= take
+            if remaining <= 0:
+                break
+
+    out = df.loc[sorted(picked)].copy()
+
+    # Importance weights back to the natural distribution.
+    p_nat = df["_cell"].value_counts(normalize=True)
+    p_smp = out["_cell"].value_counts(normalize=True)
+    w = out["_cell"].map(lambda c: p_nat.get(c, 0.0) / p_smp[c])
+    out["sample_weight"] = (w / w.mean()).astype(np.float32)
+
+    nat_rate = 100 * df["label"].mean()
+    smp_rate = 100 * out["label"].mean()
+    print(f"\nStratified sample: {len(out):,} rows "
+          f"({natural_frac:.0%} iid + {1-natural_frac:.0%} cell-balanced)")
+    print(f"  fraud rate: {nat_rate:.2f}% (corpus) -> {smp_rate:.2f}% (sampled)")
+    print(f"  {'cell (label|score bin)':<24} {'corpus':>10} {'sampled':>10} {'weight':>8}")
+    for c in sorted(p_nat.index):
+        got = int((out['_cell'] == c).sum())
+        wt = p_nat[c] / p_smp[c] if c in p_smp else float('nan')
+        print(f"  {c:<24} {int((df['_cell']==c).sum()):>10,} {got:>10,} {wt:>8.3f}")
+
+    return out.drop(columns=["_score_bin", "_cell"])
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -367,6 +465,10 @@ def main() -> None:
     parser.add_argument("--model", default=None)
     parser.add_argument("--concurrency", type=int, default=sum_cfg["concurrency"])
     parser.add_argument("--no-attributions", action="store_true")
+    parser.add_argument("--balance", default="stratified",
+                        choices=["stratified", "natural"],
+                        help="stratified: boost fraud + model-error cells, carry "
+                             "sample_weight for reweighting. natural: iid sample.")
     parser.add_argument("--build-parquet-only", action="store_true",
                         help="Skip generation; convert progress JSONL -> parquet and exit")
     args = parser.parse_args()
@@ -409,7 +511,16 @@ def main() -> None:
         act_df = act_df[act_df["train_split"] == "train"].copy()
 
     n = min(n_target, len(act_df))
-    df_sub = act_df.sample(n=n, random_state=cfg["seed"])
+    if args.balance == "natural":
+        df_sub = act_df.sample(n=n, random_state=cfg["seed"])
+        df_sub["sample_weight"] = np.float32(1.0)
+    else:
+        df_sub = stratified_sample(
+            act_df, n,
+            n_bins=sum_cfg.get("score_bins", 5),
+            natural_frac=sum_cfg.get("natural_frac", 0.5),
+            seed=cfg["seed"],
+        )
 
     # Stable row_idx = original parquet row number (before reset)
     df_sub = df_sub.copy()

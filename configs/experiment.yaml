@@ -26,6 +26,13 @@ summaries:
   max_tokens: 160
   concurrency: 20
   openrouter_model: qwen/qwen3-6b   # model for summary generation via OpenRouter
+  # Which activations get summarized. The corpus is ~3% fraud, so an iid sample
+  # spends nearly the whole API budget on one corner of activation space and
+  # starves the model-error cells that Phase 7's headline slice depends on.
+  # Half the budget stays iid; half is spread evenly over (label x score bin)
+  # cells. Rows carry sample_weight to reweight metrics back to natural rate.
+  natural_frac: 0.5
+  score_bins: 5
 
 # ── SFT (Phase 4) ─────────────────────────────────────────────────────────────
 sft:
