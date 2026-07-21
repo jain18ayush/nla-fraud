@@ -4,6 +4,15 @@ Applying Anthropic's [Natural Language Autoencoders](https://transformer-circuit
 
 The NLA translates a shallow MLP's 128-dim hidden activations into readable English explanations and back, using fine-tuned Qwen2.5-7B checkpoints (`kitft/nla-models`).
 
+> **Start here.**
+> - **[docs/RUNBOOK.md](docs/RUNBOOK.md)** — how to actually run this. The work
+>   happens on a remote A100, *not* on the laptop; read §1 before running
+>   anything.
+> - **[docs/IMPROVEMENTS.md](docs/IMPROVEMENTS.md)** — current findings, what is
+>   broken, and what to fix next, with evidence.
+>
+> Quick orientation: `./scripts/vast.sh status`
+
 ## Setup
 
 ```bash
