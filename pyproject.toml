@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nla-fraud"
+version = "0.1.0"
+description = "Natural Language Autoencoders applied to a tabular payments-fraud DNN"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "transformers>=4.40",
+    "peft>=0.10",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+    "scikit-learn>=1.4",
+    "anthropic>=0.25",
+    "openai>=1.30",
+    "matplotlib>=3.8",
+    "pyyaml>=6.0",
+    "faker>=24.0",
+    "numpy>=1.26",
+    "kaggle>=1.6",
+    "tqdm>=4.66",
+    "ipykernel>=7.3.0",
+]
+
+[project.optional-dependencies]
+shap = ["shap>=0.45"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.uv]
+dev-dependencies = []

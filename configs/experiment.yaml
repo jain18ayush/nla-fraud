@@ -1,0 +1,75 @@
+# ── Data ──────────────────────────────────────────────────────────────────────
+dataset: ieee-fraud-detection        # ieee-fraud-detection | kartik2112/fraud-detection | ealtman2019/credit-card-transactions | synthetic
+dataset_size: null                   # null = use all rows; integer = subsample
+seed: 42
+
+# ── MLP / target model ────────────────────────────────────────────────────────
+mlp:
+  hidden_dims: [256, 128, 128]       # d_in -> 256 -> 128(l2) -> 128(l3) -> 1
+  dropout: 0.3
+  batch_size: 2048
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  epochs: 20
+  early_stop_patience: 3
+
+# ── Activation corpus ─────────────────────────────────────────────────────────
+activations:
+  hook_layer: l2                     # l2 | l3
+  n_collect: 1_000_000              # rows to forward-pass for activation parquet
+  pca_components: 50                 # max components for PCA report
+
+# ── Warm-start summary generation (Phase 3) ───────────────────────────────────
+summaries:
+  n_generate: 100_000
+  n_validate: 10_000                 # run this many first to validate pipeline
+  max_tokens: 160
+  concurrency: 20
+  openrouter_model: qwen/qwen3-6b   # model for summary generation via OpenRouter
+
+# ── SFT (Phase 4) ─────────────────────────────────────────────────────────────
+sft:
+  av_model_id: kitft/nla-qwen2.5-7b-L20-av
+  ar_model_id: kitft/nla-qwen2.5-7b-L20-ar
+  lora_rank: 16
+  lora_alpha: 32
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  adapter_warmup_epochs: 1
+  sft_epochs: 3
+  batch_size: 8
+  grad_accum: 4
+  lr_adapter: 1.0e-3
+  lr_lora: 5.0e-5
+  lr_ar_head: 1.0e-3
+  # ── Phase 4 additions ───────────────────────────────────────────────────────
+  n_pairs: null                      # null = all pairs in summaries.parquet
+  n_holdout: 1000                    # carved at the NATURAL class rate, disjoint
+  # Corpus is ~3.5% fraud. Sampling SFT batches at that rate gives the AV ~25x
+  # less gradient signal on risk-flavored activations. Oversample the positives;
+  # set null to train at the natural rate.
+  fraud_fraction: 0.30
+  ar_head_mode: stack                # stack = keep pretrained value_head and add
+                                     # Linear(3584,128) on top; replace = drop it
+  ar_max_len: 320                    # AR template + explanation, tokens
+  gen_batch: 16                      # AV generation batch for round-trip eval
+
+# ── RL / GRPO (Phase 5) ───────────────────────────────────────────────────────
+rl:
+  batch_size: 32
+  group_size: 8                      # G explanations per activation
+  temperature: 1.0
+  max_new_tokens: 120
+  kl_beta: 0.05
+  lr_av: 2.0e-5
+  lr_ar: 1.0e-4
+  total_steps: 5_000
+  checkpoint_every: 500
+  eval_every: 100
+  eval_size: 512
+
+# ── Eval (Phase 6) ────────────────────────────────────────────────────────────
+eval:
+  n_held_out: 2_000
+  n_steering: 200
+  score_bins: 5
+  steering_alphas: [0.25, 0.5, 1.0, 2.0]

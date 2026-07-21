@@ -1,0 +1,11 @@
+data/
+reports/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+*.pt
+*.safetensors
+*.parquet
+*.csv
+*.zip
